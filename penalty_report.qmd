@@ -1,0 +1,453 @@
+---
+title: "Penalty Side Distribution Analysis"
+subtitle: "Comparing Professional, NCAA, and Post-Save Side Distributions"
+author: "Jake Bohane"
+date: last-modified
+date-format: "MMMM D, YYYY"
+
+format:
+  html:
+    theme: cosmo
+    toc: false
+    toc-depth: 3
+    number-sections: false
+    code-fold: true
+    code-summary: "View analysis code"
+    code-tools: false
+    embed-resources: true
+    fig-cap-location: bottom
+    tbl-cap-location: top
+
+  pdf:
+    documentclass: article
+    fontsize: 12pt
+    geometry:
+      - margin=0.75in
+    include-in-header:
+      text: |
+        \usepackage{setspace}
+        \setstretch{1.15}
+
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: false
+
+knitr:
+  opts_chunk:
+    fig-align: center
+    fig-width: 8
+    fig-height: 5
+    out-width: "90%"
+
+editor: source
+---
+<style>
+.quarto-figure-center figcaption {
+  text-align: center;
+}
+</style>
+```{r}
+#| include: false
+library(RSQLite)
+library(DBI)
+library(ggplot2)
+```
+# Introduction
+
+This report analyzes penalty-kick placement relative to the kicker’s shooting foot. The goal is divided into three equal sections: strong, center, and weak. The strong side is the same-foot side, while the weak side is the opposite-foot side. For a right-footed kicker, the right third is strong and the left third is weak; these definitions are reversed for a left-footed kicker. All directions are described from the kicker’s perspective.
+
+```{r}
+#| echo: false
+#| fig-align: center
+#| fig-width: 7
+#| fig-height: 2.2
+#| out-width: "70%"
+
+goal_sections <- data.frame(
+  foot = rep(c("Right-footed kicker", "Left-footed kicker"), each = 3),
+  side = c("Weak", "Center", "Strong", "Strong", "Center", "Weak"),
+  xmin = rep(c(0, 8 / 3, 16 / 3), times = 2),
+  xmax = rep(c(8 / 3, 16 / 3, 8), times = 2),
+  ymin = 0,
+  ymax = 2.67
+)
+
+goal_sections$foot <- factor(
+  goal_sections$foot,
+  levels = c("Left-footed kicker", "Right-footed kicker")
+)
+
+ggplot(goal_sections) +
+  geom_rect(
+    aes(
+      xmin = xmin,
+      xmax = xmax,
+      ymin = ymin,
+      ymax = ymax,
+      fill = side
+    ),
+    color = "#003660",
+    linewidth = 0.8
+  ) +
+  geom_text(
+    aes(
+      x = (xmin + xmax) / 2,
+      y = 3 / 2,
+      label = side
+    ),
+    fontface = "bold",
+    size = 5
+  ) +
+  facet_wrap(~foot, nrow = 1) +
+  scale_fill_manual(
+    values = c(
+      "Strong" = "#FEBC11",
+      "Center" = "#EEEEEE",
+      "Weak" = "#B8E0E3"
+    )
+  ) +
+  coord_fixed(
+    xlim = c(0, 8),
+    ylim = c(0, 2.67),
+    expand = FALSE
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(
+      face = "bold",
+      size = 18,
+      margin = margin(b = 8)
+    ),
+    panel.spacing = grid::unit(1, "cm"),
+    plot.margin = margin(2, 2, 2, 2)
+  )
+```
+
+The analysis includes 1,557 professional penalties with recorded placement coordinates and 413 NCAA penalties coded from video, for a total of 1,970 valid attempts. It addresses two questions:
+
+1. Are penalty-direction distributions consistent between the NCAA and professional samples?
+
+2. Does a player’s direction distribution change after their previous penalty was saved?
+
+\newpage
+# NCAA vs Professional Penalties
+```{r}
+#| include: false
+pro_pens <- read.csv("data/statsbomb_open_penalties.csv")
+con <- dbConnect(SQLite(),"penalties.sqlite")
+dbWriteTable(con,"pro_penalties",pro_pens,overwrite=TRUE)
+dbListTables(con)
+dbGetQuery(con,'SELECT DISTINCT(body_part) FROM pro_penalties')
+dbExecute(con, 'DROP VIEW IF EXISTS valid_pro_penalties')
+dbExecute(con,'
+CREATE VIEW valid_pro_penalties AS 
+
+WITH side_table AS (
+SELECT *,
+        CASE WHEN end_y < 38.6667 THEN "left"
+             WHEN end_y >= 38.6667 AND end_y <= 41.3333 THEN "center"
+             WHEN end_y > 41.3333 THEN "right" 
+             ELSE NULL END AS side
+FROM penalties
+)
+               
+SELECT *,
+       CASE WHEN body_part = "Right Foot" THEN CASE WHEN side = "right" THEN "strong"
+                                                    WHEN side = "left" THEN "weak"
+                                                    WHEN side = "center" THEN "center"
+                                                    ELSE NULL END
+            WHEN body_part = "Left Foot" THEN CASE WHEN side = "left" THEN "strong"
+                                                    WHEN side = "right" THEN "weak"
+                                                    WHEN side = "center" THEN "center"
+                                                    ELSE NULL END
+            ELSE NULL END AS relative_side
+FROM side_table WHERE side IS NOT NULL AND body_part IN ("Right Foot","Left Foot")
+')
+head(dbGetQuery(con,'SELECT * FROM valid_pro_penalties'),5)
+
+pro_side_dist <- dbGetQuery(con,'
+WITH counts AS (
+SELECT CASE WHEN relative_side = "strong" THEN 1
+            ELSE 0 END AS is_strong,
+       CASE WHEN relative_side = "center" THEN 1
+            ELSE 0 END AS is_center,
+       CASE WHEN relative_side = "weak" THEN 1
+            ELSE 0 END AS is_weak
+FROM valid_pro_penalties
+)
+
+SELECT 100 * AVG(is_strong) AS strong_pct,
+       100 * AVG(is_center) AS center_pct,
+       100 * AVG(is_weak) AS weak_pct
+FROM counts
+')
+pro_side_dist
+```
+```{r}
+#| include: false
+college_pens = read.csv("data/ncaa_pk_coding_tracker_Kick_Data.csv",check.names = FALSE)
+dbWriteTable(con,"college_penalties",college_pens,overwrite=TRUE)
+dbGetQuery(con,'SELECT DISTINCT("Direction (Foot-relative)") FROM college_penalties')
+dbGetQuery(con,'PRAGMA table_info(college_penalties)')
+dbExecute(con,'DROP VIEW IF EXISTS valid_college_penalties')
+dbExecute(con,'CREATE VIEW valid_college_penalties AS SELECT * FROM college_penalties WHERE "Direction (Foot-relative)" IN ("Weak","Center","Strong")')
+
+college_side_dist <- dbGetQuery(con,'
+WITH counts AS (
+SELECT CASE WHEN "Direction (Foot-relative)" = "Strong" THEN 1
+            ELSE 0 END AS is_strong,
+       CASE WHEN "Direction (Foot-relative)" = "Center" THEN 1
+            ELSE 0 END AS is_center,
+       CASE WHEN "Direction (Foot-relative)" = "Weak" THEN 1
+            ELSE 0 END AS is_weak
+FROM valid_college_penalties
+)
+
+SELECT 100 * AVG(is_strong) AS strong_pct,
+       100 * AVG(is_center) AS center_pct,
+       100 * AVG(is_weak) AS weak_pct
+FROM counts
+')
+college_side_dist
+```
+```{r}
+#| label: fig-ncaa-professional
+#| fig-cap: "Penalty direction distributions in the NCAA and professional samples."
+#| echo: false
+#| fig-align: center
+#| fig-pos: H
+both_pct <- data.frame(
+  dataset = c("NCAA","NCAA","NCAA","Professional","Professional","Professional"),
+  side = c("Strong","Center","Weak","Strong","Center","Weak"),
+  percentage = c(college_side_dist$strong_pct,college_side_dist$center_pct,college_side_dist$weak_pct,pro_side_dist$strong_pct,pro_side_dist$center_pct,pro_side_dist$weak_pct)
+)
+both_pct$side <- factor(both_pct$side, levels = c("Strong","Center","Weak"))
+ggplot(
+  both_pct,
+  aes(x=side,y=percentage,fill=dataset)
+  
+) + 
+geom_col(
+  position = position_dodge(width=0.8),
+  width=0.7
+) +
+geom_text(
+  aes(label=paste0(round(percentage,2),"%")),
+  position = position_dodge(width=0.8),
+  vjust = -0.4,
+  size=3.5
+) +
+scale_fill_manual(
+  values = c("NCAA" = "#003660","Professional" = "#FEBC11")
+) +
+labs(
+  title = "NCAA vs Professional Penalty Side Distribution",
+  subtitle = "NCAA: 413 attempts; Professional: 1,557 attempts",
+  x = "Direction relative to kicking foot",
+  y = "Percentage of attempts",
+  fill = NULL
+) +
+theme_minimal() +
+theme(legend.position = "top")
+```
+```{r}
+#| include: false
+#| label: test-ncaa-professional
+#| echo: true
+dbGetQuery(con, 'SELECT SUM(CASE WHEN relative_side = "strong" THEN 1
+            ELSE 0 END) AS strong_count,
+       SUM(CASE WHEN relative_side = "center" THEN 1
+            ELSE 0 END) AS center_count,
+       SUM(CASE WHEN relative_side = "weak" THEN 1
+            ELSE 0 END) AS weak_count
+FROM valid_pro_penalties')
+dbGetQuery(con, 'SELECT SUM(CASE WHEN "Direction (Foot-relative)" = "Strong" THEN 1
+            ELSE 0 END) AS strong_count,
+       SUM(CASE WHEN "Direction (Foot-relative)" = "Center" THEN 1
+            ELSE 0 END) AS center_count,
+       SUM(CASE WHEN "Direction (Foot-relative)" = "Weak" THEN 1
+            ELSE 0 END) AS weak_count
+FROM valid_college_penalties')
+side_counts <- matrix(
+  c(
+    575, 165, 817,  # Professional
+    153,  43, 217   # NCAA
+  ),
+  nrow = 2,
+  byrow = TRUE,
+  dimnames = list(
+    Dataset = c("Professional", "NCAA"),
+    Direction = c("Strong", "Center", "Weak")
+  )
+)
+
+ncaa_pro_test <- chisq.test(side_counts)
+
+side_counts
+ncaa_pro_test
+```
+The NCAA and professional samples produced nearly identical direction distributions. NCAA kickers selected the strong side on 37.0% of attempts, the center on 10.4%, and the weak side on 52.5%. Professional kickers selected those directions on 36.9%, 10.6%, and 52.5% of attempts, respectively. A chi-squared test of homogeneity found no evidence that the distributions differed, $\chi^2(2) = 0.012$, $p = .994$. This high p-value indicates that differences at least as large as those observed would be very common if the two populations shared the same direction distribution. The observed differences were extremely small, suggesting that collegiate and professional penalties may follow a similar general distribution of approximately 37% strong, 10.5% center, and 52.5% weak.
+
+\newpage
+# Professional Penalty Direction Overall vs Following a Save
+```{r}
+#| include: false
+#| fig-pos: H
+pro_post_save_pens <- read.csv("data/pro_post_save_transitions_audit_edit.csv",skip=1,check.names=FALSE,na.strings = c("","NA"))
+head(pro_post_save_pens,5)
+dbWriteTable(con,"pro_post_save",pro_post_save_pens,overwrite=TRUE)
+dbGetQuery(con, "SELECT DISTINCT(actual_next_direction) FROM pro_post_save")
+dbExecute(con, "DROP VIEW IF EXISTS pro_post_save_valid")
+dbExecute(con,"CREATE VIEW pro_post_save_valid AS 
+          SELECT player_id, player, saved_date, saved_match_id, saved_team, saved_home, saved_away, saved_direction,saved_shootout,
+          CASE WHEN actual_next_direction = 'None' THEN next_direction ELSE actual_next_direction END AS next_direction,
+          CASE WHEN actual_next_direction = 'None' THEN next_outcome ELSE actual_next_outcome END AS next_outcome,
+          CASE WHEN actual_next_direction = 'None' THEN next_shootout ELSE actual_next_shootout END AS next_shootout
+          FROM pro_post_save WHERE actual_next_direction IN ('None','weak','strong','center')
+          ")
+dbGetQuery(con,"SELECT * FROM pro_post_save_valid")
+pro_post_save_dist <- dbGetQuery(con, "
+WITH counts AS(
+SELECT CASE WHEN next_direction = 'strong' THEN 1 
+            ELSE 0 END AS is_strong,
+       CASE WHEN next_direction = 'center' THEN 1 
+            ELSE 0 END AS is_center,
+       CASE WHEN next_direction = 'weak' THEN 1 
+            ELSE 0 END AS is_weak
+FROM pro_post_save_valid
+)
+SELECT 100 * AVG(is_strong) AS strong_pct,
+       100 * AVG(is_center) AS center_pct,
+       100 * AVG(is_weak) AS weak_pct
+FROM counts
+")
+pro_post_save_dist
+```
+
+```{r}
+#| label: fig-post-save
+#| fig-cap: "Professional penalty-direction distributions overall and following a saved attempt."
+#| echo: false
+#| fig-align: center
+#| fig-pos: H
+norm_and_save_pct <- data.frame(
+  type = c("Professional","Professional","Professional","Professional Post-Save","Professional Post-Save","Professional Post-Save"), 
+  side = c("Strong","Center","Weak","Strong","Center","Weak"), 
+  percentage = c(pro_side_dist$strong_pct, pro_side_dist$center_pct, pro_side_dist$weak_pct, pro_post_save_dist$strong_pct, pro_post_save_dist$center_pct, pro_post_save_dist$weak_pct)
+)
+norm_and_save_pct$side <- factor(norm_and_save_pct$side, levels = c("Strong","Center","Weak"))
+ggplot(
+  norm_and_save_pct, aes(x=side,y=percentage, fill=type)
+  ) +
+geom_col(
+  position=position_dodge(width=0.8),
+  width=0.7
+) +
+geom_text(
+  aes(label=paste0(round(percentage,2),"%")),
+  position=position_dodge(width=0.8),
+  vjust=-0.4,
+  size=3.5
+) +
+scale_fill_manual(
+  values= c("Professional" = "#FEBC11","Professional Post-Save" = "#008C95")
+) +
+labs(
+  title = ("Professional vs Professional Post-Save Penalty Distribution"),
+  subtitle = ("Professional: 1,557 attempts; Professional Post-Save: 67 attempts"),
+  x = "Direction relative to kicking foot",
+  y = "Percentage of attempts",
+  fill = NULL
+) +
+theme_minimal() +
+theme(legend.position = "top")
+```
+```{r}
+#| include: false
+#| label: test-post-save
+#| echo: true
+dbGetQuery(con, 'SELECT SUM(CASE WHEN next_direction = "strong" THEN 1
+            ELSE 0 END) AS strong_count,
+       SUM(CASE WHEN next_direction = "center" THEN 1
+            ELSE 0 END) AS center_count,
+       SUM(CASE WHEN next_direction = "weak" THEN 1
+            ELSE 0 END) AS weak_count
+FROM pro_post_save_valid')
+overall_weak_rate <- 817 / 1557
+
+post_save_test <- binom.test(
+  x = 44,
+  n = 67,
+  p = overall_weak_rate,
+  alternative = "two.sided"
+)
+
+post_save_test
+```
+```{r}
+#| include: false
+#| label: test-post-save-goodness-of-fit
+#| echo: true
+
+# Overall professional direction counts
+pro_direction_counts <- dbGetQuery(con, "
+  SELECT
+    SUM(CASE WHEN relative_side = 'strong' THEN 1 ELSE 0 END) AS strong,
+    SUM(CASE WHEN relative_side = 'center' THEN 1 ELSE 0 END) AS center,
+    SUM(CASE WHEN relative_side = 'weak' THEN 1 ELSE 0 END) AS weak
+  FROM valid_pro_penalties
+")
+
+# Verified post-save direction counts
+post_save_direction_counts <- dbGetQuery(con, "
+  SELECT
+    SUM(CASE WHEN next_direction = 'strong' THEN 1 ELSE 0 END) AS strong,
+    SUM(CASE WHEN next_direction = 'center' THEN 1 ELSE 0 END) AS center,
+    SUM(CASE WHEN next_direction = 'weak' THEN 1 ELSE 0 END) AS weak
+  FROM pro_post_save_valid
+")
+
+# Convert the one-row data frames into numeric vectors
+pro_counts <- unlist(pro_direction_counts[1, ])
+post_save_counts <- unlist(post_save_direction_counts[1, ])
+
+# Convert the professional counts into reference probabilities
+pro_probabilities <- pro_counts / sum(pro_counts)
+
+# Run the chi-squared goodness-of-fit test
+post_save_gof_test <- chisq.test(
+  x = post_save_counts,
+  p = pro_probabilities
+)
+
+pro_counts
+post_save_counts
+pro_probabilities
+post_save_gof_test
+```
+The verified post-save sample showed a visible shift in direction selection relative to the overall professional sample. Following a save, kickers selected the weak side on 65.7% of attempts, compared with 52.5% across all professional penalties. Strong side attempts decreased from 36.9% overall to 26.9% following a save, while center attempts decreased from 10.6% to 7.5%.
+
+A binomial test found that the post-save weak side rate differed significantly from the overall professional weak side rate, $p = .037$. The estimated post-save weak side rate was 65.7%, with a 95% confidence interval from 53.1% to 76.8%. However, a chi-squared goodness of fit test comparing the complete strong/center/weak distributions did not reach the conventional significance threshold of $p\leq0.05$, only achieving $\chi^2(2) = 4.68$, $p = .096$. With only 67 verified post-save attempts, this test may have had limited power to detect a difference across all three directions.
+
+These results provide preliminary evidence that kickers may shift away from their strong side and toward their weak side after having a penalty saved. However, some players appear more than once, and the sample size is small. It therefore requires confirmation with a larger independent sample before it can be treated as a reliable indicator of a player’s next penalty direction.
+
+\newpage
+# Conclusion
+
+The NCAA and professional samples produced nearly identical side distributions, with no statistical evidence of a difference between them. Together, these results suggest that penalties at these levels may follow a common population pattern of approximately 37% strong, 10% center, and 53% weak. Goalkeepers should be aware of this tendency and consider how it could inform their penalty saving preparation. This similarity also suggests that patterns identified in larger professional datasets may provide useful starting points for collegiate analysis. Because substantially more professional data is available, these datasets could help identify tendencies worth testing and validating at the collegiate level.
+
+These results provide preliminary evidence that kickers may shift away from their strong side and toward their weak side after having a penalty saved. However, the verified post-save sample contains only 67 attempts, and some players appear more than once. Some verified post-save attempts may also appear in the overall professional sample, meaning the two samples are not completely independent. While the current data is promising, the trend requires confirmation with a larger independent sample before it can be treated as a reliable indicator of a player’s next penalty direction.
+
+Penalty saving is often regarded as an art, and data cannot completely, or even mostly, predetermine where a player will shoot. A goalkeeper must still consider individual tendencies, match context, run up cues, and intuition. Nevertheless, historical data can reveal useful tendencies that might otherwise go unnoticed. Overall, these results indicate that penalty kicks may contain consistent and potentially actionable patterns. Statistical analysis should therefore supplement, rather than replace, the goalkeeper’s preparation and judgment.
+
+## Data
+
+- **Professional sample:** The professional analysis used StatsBomb Open Data containing 1,557 penalty attempts from elite club and international competitions. [StatsBomb Open Data](https://github.com/statsbomb/open-data)
+
+- **NCAA sample:** The collegiate analysis used 419 penalties manually coded from NCAA tournament and conference shootout videos. Six attempts from the shootouts analyzed were not included in the videos, leaving 413 valid penalties.
+
+- **Post-save sample:** The initial data contained 93 observed sequences following a saved penalty. After manually checking for intervening penalties, 67 sequences were verified or corrected. Twenty four women’s sequences could not be independently verified, and two unreliable cases were removed.
